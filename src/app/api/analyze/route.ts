@@ -1,4 +1,3 @@
-// src/app/api/analyze/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
@@ -7,14 +6,16 @@ import type { AnalysisResult, Issue } from "@/app/lib/schema";
 
 // ── Config
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const TIMEOUT_MS = 20_000; // aret si model pran tro lontan
-const MAX_TEXT_CHARS = 8000; // baraz pou text extra long
+const TIMEOUT_MS = 20_000; // stop if the model takes too long
+const MAX_TEXT_CHARS = 8000; // clip overly long input
 
-// Prefer env: .env.local -> GEMINI_API_KEY=...
-// (pa servi fallback kle dan kod)
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? "AIzaSyBix89P25y6tu4k2KSuCT1l2-RF9uBnOWY" });
+// Prefer .env.local -> GEMINI_API_KEY=...
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY is required");
+}
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Eschema repons Gemini (string enums pou konpatibilite)
+// Response schema used by Gemini (string enums for compatibility)
 const responseSchema = {
   type: Type.OBJECT,
   properties: {
@@ -53,36 +54,29 @@ const responseSchema = {
   required: ["overall_label", "issues"],
 } as const;
 
-// ── Types pou parse repons Gemini avan nou konverti lor schema lokal
-type OverallLabel = "safe" | "risky" | "unsafe";
-type GeminiSeverity = "0" | "1" | "2" | "3";
-type GeminiOffense = Issue["offense"]; // reuse mem union
+// ── Types for parsing Gemini JSON before converting to local schema
 
 type GeminiIssue = {
   start: number;
   end: number;
   quote: string;
-  offense: GeminiOffense;
-  severity: GeminiSeverity;
+  offense: Issue["offense"];
+  severity: "0" | "1" | "2" | "3";
   rationale: string;
 };
 
 type GeminiAnalysis = {
-  overall_label: OverallLabel;
+  overall_label: AnalysisResult["overall_label"];
   issues: GeminiIssue[];
 };
 
-// ── Pre-scan eiristik pou donn lindikasyon (konservatif)
+// ── Lightweight heuristics to provide model hints (conservative)
 const RX = {
-  // insult: tanzin/nom apel tipik dan Kreol + bann mo an Angle/Franse ki dimounn servi souvan
   insults:
     /\b(bet|bete|kouyon|koyon|kretin|bourik|idiot|stupid|stupide|moron|perdant|loser|sal|malprop|garbag|trash|clueless)\b/gi,
-  // menas/violans: verb Kreol/Franse/Angle souvan zwenn
   threats:
     /\b(touy|tue|kill|fer\s+dimal|hurt|bat|baté?|beat|atake|attack|brile|burn|tir|shoot|detwi|detruire|destroy|menas|menace|threaten)\b/gi,
-  // zeneral mo ki endik violans/mor
   violence: /\b(vyolans|violence|mor|lamor|mori|die|death|lynch|linch)\b/gi,
-  // stereotip lor group proteze
   stereotypes:
     /(dimounn?\s*sorti\s*depi|dimounn?|fam|zom|imigran|immigrants?|minorite|relizyon|religion|ras|etnisite|ethnicit[eé]?)[^.!?]{0,60}\b(zot|bizin|bizwin|fode|faut|toultan|touzour|toujours|zame|jamais|doit|should|must)\b[^.!?]{0,60}\b(parese|paresi|lazy|bet|stupid|inferyer|inferieur|criminals?|kriminel|feb|faible|weak)\b/gi,
 };
@@ -132,7 +126,7 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
   return out;
 }
 
-function reconcileOverall(modelLabel: OverallLabel, issues: Issue[]): OverallLabel {
+function reconcileOverall(modelLabel: AnalysisResult["overall_label"], issues: Issue[]): AnalysisResult["overall_label"] {
   const maxSev = issues.reduce((m, i) => Math.max(m, i.severity), 0);
   if (maxSev >= 3) return "unsafe";
   if (maxSev === 2 || issues.length >= 2) return modelLabel === "safe" ? "risky" : modelLabel;
@@ -151,7 +145,6 @@ function postProcess(gemini: GeminiAnalysis, text: string): AnalysisResult {
     let end = clamp(iss.end ?? 0, 0, text.length);
     if (end < start) [start, end] = [end, start];
 
-    // Asire quote pe match avek sipoze-slice; sinon, re-ankre par rod quote
     let quote = text.slice(start, end);
     if (iss.quote && !quote.includes(iss.quote)) {
       const idx = text.indexOf(iss.quote);
@@ -166,7 +159,7 @@ function postProcess(gemini: GeminiAnalysis, text: string): AnalysisResult {
       start,
       end,
       quote: quote.trim(),
-      offense: iss.offense as Issue["offense"],
+      offense: iss.offense,
       severity: toNumberSeverity(iss.severity),
       rationale: (iss.rationale || "").trim(),
     };
@@ -203,12 +196,10 @@ async function callGeminiJSON({ text, hints }: { text: string; hints: Hint[] }) 
     `- Reste konservatif me pa rate bann violasion evidan.\n` +
     `- Si pena nanye problematik: retourne issues: [].`;
 
-  // Converti hints an teks kompakte ki model kapav servi
   const hintLines = hints
     .slice(0, 12)
     .map(
-      (h, i) =>
-        `#${i + 1} ${h.kind} @ ${h.start}-${h.end}: "${h.quote.replace(/\n/g, " ").slice(0, 120)}"`
+      (h, i) => `#${i + 1} ${h.kind} @ ${h.start}-${h.end}: "${h.quote.replace(/\n/g, " ").slice(0, 120)}"`
     )
     .join("\n");
   const hintBlock = hints.length ? `\n\nIndikasion eiristik (kapav inkomplé; verifye bien):\n${hintLines}` : "";
@@ -217,20 +208,18 @@ async function callGeminiJSON({ text, hints }: { text: string; hints: Hint[] }) 
   const t = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-   const response = await ai.models.generateContent({
-  model: MODEL,
-  contents: [{ role: "user", parts: [{ text }] }],
-  config: {
-    // The SDK accepts a string here (or a Content object).
-    systemInstruction: system + hintBlock,
-    responseMimeType: "application/json",
-    responseSchema,
-    temperature: 0.2,
-  },
-  // @ts-expect-error – some SDK versions pa ankor tipé `signal`
-  signal: controller.signal,
-});
-
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: [{ role: "user", parts: [{ text }] }],
+      config: {
+        systemInstruction: system + hintBlock,
+        responseMimeType: "application/json",
+        responseSchema,
+        temperature: 0.2,
+      },
+      // @ts-expect-error – some SDK versions don't type `signal`
+      signal: controller.signal,
+    });
 
     return readTextField(response);
   } finally {
@@ -239,7 +228,6 @@ async function callGeminiJSON({ text, hints }: { text: string; hints: Hint[] }) 
 }
 
 async function analyzeWithRepair(text: string, hints: Hint[]): Promise<AnalysisResult> {
-  // Premie tentativ
   const raw = await callGeminiJSON({ text, hints });
   try {
     const parsed = JSON.parse(raw) as GeminiAnalysis;
@@ -248,22 +236,20 @@ async function analyzeWithRepair(text: string, hints: Hint[]): Promise<AnalysisR
     // fall through
   }
 
-  // Reparasion avek instriksion pli strik
   const stricter = `Retourne SELMAN JSON valid. Pa met okenn komanter ouswa markdown. Servi exak non-la-champs ek tip valer dan schema.`;
   const response2 = await ai.models.generateContent({
-  model: MODEL,
-  contents: [
-    { role: "user", parts: [{ text: `Text pou analiz:\n${text}` }] },
-    { role: "user", parts: [{ text: `Servi sa schema-la ek prodwir JSON selman.` }] },
-  ],
-  config: {
-    systemInstruction: stricter,
-    responseMimeType: "application/json",
-    responseSchema,
-    temperature: 0.1,
-  },
-});
-
+    model: MODEL,
+    contents: [
+      { role: "user", parts: [{ text: `Text pou analiz:\n${text}` }] },
+      { role: "user", parts: [{ text: `Servi sa schema-la ek prodwir JSON selman.` }] },
+    ],
+    config: {
+      systemInstruction: stricter,
+      responseMimeType: "application/json",
+      responseSchema,
+      temperature: 0.1,
+    },
+  });
 
   const raw2 = readTextField(response2);
   const parsed2 = JSON.parse(raw2) as GeminiAnalysis;
@@ -272,10 +258,7 @@ async function analyzeWithRepair(text: string, hints: Hint[]): Promise<AnalysisR
 
 export async function POST(req: Request) {
   try {
-    const bodyUnknown = await req.json().catch(() => ({}));
-    const body = (bodyUnknown ?? {}) as Record<string, unknown>;
-    const txt = body["text"];
-    const text = typeof txt === "string" ? txt : "";
+    const { text = "" } = (await req.json().catch(() => ({}))) as { text?: string };
 
     if (!text.trim()) {
       return NextResponse.json({ error: "Text manke" }, { status: 400 });
