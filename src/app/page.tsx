@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from "react";
 import { Shield, Wand2, XCircle, Loader2 } from "lucide-react";
-import type { AnalysisResult, Issue } from "../lib/schema";
+import type { AnalysisResult, Issue } from "@/app/lib/schema";
 
 // Palet: neutre kalm avek ti tint dapre severite
 const SEVERITY_STYLE: Record<number, string> = {
