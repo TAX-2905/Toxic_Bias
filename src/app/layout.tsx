@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "ToxiBias",
-  description: "Sa ggt la zis 1 test version sa",
+  description: "Test Version ONLY and NOT final",
 };
 
 export default function RootLayout({

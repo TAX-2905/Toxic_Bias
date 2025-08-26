@@ -4,7 +4,7 @@ export const OFFENSE_FOR_BUCKET = {
   insults: "harassment",
   threats: "violence",
   violence: "violence",
-  slur_bias: "bias",
+  slur_bias: "hate",
 } as const;
 
 export type Bucket = keyof typeof OFFENSE_FOR_BUCKET;
@@ -13,7 +13,7 @@ export type Bucket = keyof typeof OFFENSE_FOR_BUCKET;
 export const LEXICON: Record<Bucket, string[]> = {
   insults: [
     "bet", "bete", "kouyon", "koyon", "kretin", "bourik", "idiot",
-    "stupide", "moron", "perdant", "loser", "sal", "malprop", "trash", "garbag", "clueless", "falourmama", "gogote" 
+    "stupide", "moron", "perdant", "loser", "sal", "malprop", "trash", "garbag", "clueless"
   ],
   threats: [
     "touy", "tue", "kill", "bat", "bate", "atake", "attack", "brile", "burn",
@@ -21,6 +21,6 @@ export const LEXICON: Record<Bucket, string[]> = {
   ],
   violence: ["vyolans", "violence", "mor", "lamor", "mori", "die", "death", "lynch", "linch"],
   slur_bias: [
-    // add local slurs / bias phrases here (avoid putting actual insults in public repos)
+  "falourmama", "gogote", "pilone", "madras", "nation", "lascar", "torma", "torpa", "morma", "morpa", "liki", "likimama", "kkliki", "bachara"
   ],
 };
