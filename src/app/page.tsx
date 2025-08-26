@@ -4,6 +4,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, useTransition
 import { Shield, Wand2, XCircle, Loader2, Volume2 } from "lucide-react";
 import type { AnalysisResult, Issue } from "@/app/lib/schema";
 
+
+
 // Palet: neutre kalm avek ti tint dapre severite
 const SEVERITY_STYLE: Record<number, string> = {
   0: "bg-emerald-50 ring-emerald-200 text-emerald-800",
