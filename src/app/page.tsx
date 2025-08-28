@@ -1,6 +1,16 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState, useTransition, useDeferredValue, memo } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,  // <-- add this
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+  useDeferredValue,
+  memo,
+} from "react";
 import { Shield, Wand2, XCircle, Loader2, Volume2 } from "lucide-react";
 import type { AnalysisResult, Issue } from "@/app/lib/schema";
 
@@ -35,6 +45,7 @@ const OFFENSE_LABELS: Record<Issue["offense"], string> = {
   stereotype: "Stereotip",
 } as const;
 
+// UPDATED: keep offense singular when merging (deterministic)
 function mergeOverlaps(issues: Issue[]): Issue[] {
   if (issues.length <= 1) return issues.slice();
   const sorted = [...issues].sort((a, b) => a.start - b.start);
@@ -45,9 +56,13 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
     if (!prev || cur.start > prev.end) out.push({ ...cur });
     else {
       prev.end = Math.max(prev.end, cur.end);
+      // choose strongest as canonical offense
+      if (cur.severity > prev.severity) {
+        prev.offense = cur.offense;
+      }
       prev.severity = Math.max(prev.severity, cur.severity) as 0 | 1 | 2 | 3;
-      if (!prev.offense.includes(cur.offense)) prev.offense += `, ${cur.offense}`;
       prev.rationale = `${prev.rationale}\n— ${cur.rationale}`;
+      if ((cur.quote?.length ?? 0) > (prev.quote?.length ?? 0)) prev.quote = cur.quote;
     }
   }
   return out;
@@ -258,8 +273,28 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRead, ttsSupported]);
 
+  // --- Textarea autosize
+const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+const autoSize = useCallback((el: HTMLTextAreaElement | null) => {
+  if (!el) return;
+  // reset height then grow to content
+  el.style.height = "0px";
+  // cap to 85% of viewport height for sanity; remove Math.min(...) if you truly want unlimited growth
+  el.style.height = Math.min(el.scrollHeight, Math.floor(window.innerHeight * 0.85)) + "px";
+}, []);
+
+// keep height in sync when text changes (including programmatic changes)
+useLayoutEffect(() => {
+  autoSize(taRef.current);
+}, [autoSize, text]);
+
+
   const analyze = useCallback(async () => {
     if (!text.trim()) return;
+    // NEW: short-circuit identical re-runs to avoid flips
+    //if (lastAnalyzedTextRef.current === text && result) return;
+
     setLoading(true);
     setError(null);
     // don't clear result immediately; keep UI stable while loading
@@ -297,7 +332,7 @@ export default function Page() {
     } finally {
       setLoading(false);
     }
-  }, [text, speakText, startTransition]);
+  }, [text, result, speakText, startTransition]);
 
   const resetAll = useCallback(() => {
     setText("");
@@ -344,12 +379,17 @@ export default function Page() {
             Paragraph
           </label>
           <textarea
-            id="input"
-            value={text}
-            onChange={useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => setText(e.target.value), [])}
-            placeholder="Met 1 text ici pou analizer…"
-            className="w-full h-56 md:h-64 rounded-2xl border border-zinc-200 focus:ring-2 focus:ring-zinc-900/10 focus:outline-none p-5 bg-zinc-50/40 text-[16px] leading-7"
-          />
+  id="input"
+  ref={taRef}
+  value={text}
+  onInput={useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setText(e.target.value);
+    autoSize(e.currentTarget);
+  }, [autoSize])}
+  placeholder="Met 1 text ici pou analizer…"
+  className="w-full h-auto min-h-[10vh] md:min-h-[10vh] rounded-2xl border border-zinc-200 focus:ring-2 focus:ring-zinc-900/10 focus:outline-none p-5 bg-zinc-50/40 text-[16px] leading-7 overflow-hidden resize-none"
+/>
+
 
           {/* Aksion */}
           <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -447,3 +487,5 @@ export default function Page() {
     </main>
   );
 }
+
+

@@ -13,13 +13,7 @@ const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const TIMEOUT_MS = 20_000; // stop if the model takes too long
 const MAX_TEXT_CHARS = 8_000; // clip overly long input
 
-// Prefer .env.local -> GEMINI_API_KEY=...
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error("GEMINI_API_KEY is required");
-}
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-// Response schema used by Gemini (string enums for compatibility)
+// Response schema used by Gemini (string enums for compatibility)  <-- moved up
 const responseSchema = {
   type: Type.OBJECT,
   properties: {
@@ -57,6 +51,22 @@ const responseSchema = {
   },
   required: ["overall_label", "issues"],
 } as const;
+
+// Deterministic generation config  <-- now safely references responseSchema
+const GEN_CFG = {
+  responseMimeType: "application/json",
+  responseSchema,
+  temperature: 0,
+  topP: 0,
+  topK: 1,
+  randomSeed: 0,
+} as const;
+
+// Prefer .env.local -> GEMINI_API_KEY=...
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY is required");
+}
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // ── Types for parsing Gemini JSON before converting to local schema
 
@@ -107,7 +117,7 @@ function consonantBeforeVowelInitials(w: string) {
     if (i === 0 && isConsonant(c)) out += c;
     else if (isConsonant(c) && isVowel(n)) out += c;
   }
-  return out; // ← remove collapsing here
+  return out; // ← no collapsing here
 }
 
 function noVowels(w: string) {
@@ -173,12 +183,11 @@ type Hint = { start: number; end: number; kind: Issue["offense"]; quote: string 
 
 // Build hints on ORIGINAL text, detect on NORMALIZED text, map spans back.
 function buildHints(text: string): Hint[] {
-const { norm, map } = normalizeForMatch(text, {
-  foldDiacritics: true,
-  lowercase: true,
-  repeatMax: 2, // ← was 1
-});
-
+  const { norm, map } = normalizeForMatch(text, {
+    foldDiacritics: true,
+    lowercase: true,
+    repeatMax: 2, // ← was 1
+  });
 
   const hints: Hint[] = [];
 
@@ -224,6 +233,7 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+// UPDATED: server-side merge keeps single offense (strongest) deterministically
 function mergeOverlaps(issues: Issue[]): Issue[] {
   const sorted = [...issues].sort((a, b) => a.start - b.start);
   const out: Issue[] = [];
@@ -233,6 +243,9 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
       out.push({ ...cur });
     } else {
       last.end = Math.max(last.end, cur.end);
+      if (cur.severity > last.severity) {
+        last.offense = cur.offense;
+      }
       last.severity = Math.max(last.severity, cur.severity) as 0 | 1 | 2 | 3;
       if (!String(last.offense).includes(String(cur.offense))) {
         // keep comma-joined labels if overlapping categories occur
@@ -246,14 +259,16 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
   return out;
 }
 
+// UPDATED: make overall purely a function of issues (deterministic)
 function reconcileOverall(
-  modelLabel: AnalysisResult["overall_label"],
+  _modelLabel: AnalysisResult["overall_label"],
   issues: Issue[]
 ): AnalysisResult["overall_label"] {
+  if (issues.length === 0) return "safe";
   const maxSev = issues.reduce((m, i) => Math.max(m, i.severity), 0);
   if (maxSev >= 3) return "unsafe";
-  if (maxSev === 2 || issues.length >= 2) return modelLabel === "safe" ? "risky" : modelLabel;
-  return modelLabel;
+  if (maxSev >= 2 || issues.length >= 2) return "risky";
+  return "safe";
 }
 
 function toNumberSeverity(s: string | number): 0 | 1 | 2 | 3 {
@@ -262,35 +277,54 @@ function toNumberSeverity(s: string | number): 0 | 1 | 2 | 3 {
   return clamped as 0 | 1 | 2 | 3;
 }
 
-function postProcess(gemini: GeminiAnalysis, text: string): AnalysisResult {
-  const fixed: Issue[] = gemini.issues.map((iss) => {
-    let start = clamp(iss.start ?? 0, 0, text.length);
-    let end = clamp(iss.end ?? 0, 0, text.length);
-    if (end < start) [start, end] = [end, start];
+// UPDATED: accept hints and add heuristic floor + drop invalid spans
+function postProcess(gemini: GeminiAnalysis, text: string, hints: Hint[]): AnalysisResult {
+  const fixed: Issue[] = gemini.issues
+    .map((iss) => {
+      let start = clamp(iss.start ?? 0, 0, text.length);
+      let end = clamp(iss.end ?? 0, 0, text.length);
+      if (end < start) [start, end] = [end, start];
 
-    let quote = text.slice(start, end);
-    if (iss.quote && !quote.includes(iss.quote)) {
-      const idx = text.indexOf(iss.quote);
-      if (idx >= 0) {
-        start = idx;
-        end = idx + iss.quote.length;
-        quote = iss.quote;
+      let quote = text.slice(start, end);
+      if (iss.quote && !quote.includes(iss.quote)) {
+        const idx = text.indexOf(iss.quote);
+        if (idx >= 0) {
+          start = idx;
+          end = idx + iss.quote.length;
+          quote = iss.quote;
+        }
       }
-    }
 
-    return {
-      start,
-      end,
-      quote: quote.trim(),
-      offense: iss.offense,
-      severity: toNumberSeverity(iss.severity),
-      rationale: (iss.rationale || "").trim(),
-    };
-  });
+      return {
+        start,
+        end,
+        quote: quote.trim(),
+        offense: iss.offense,
+        severity: toNumberSeverity(iss.severity),
+        rationale: (iss.rationale || "").trim(),
+      };
+    })
+    .filter((i) => i.end > i.start && i.quote.length > 0);
 
   const merged = mergeOverlaps(fixed);
-  const overall = reconcileOverall(gemini.overall_label, merged);
-  return { overall_label: overall, issues: merged };
+
+  // Heuristic fallback if model returns nothing but hints exist
+  const withFallback =
+    merged.length > 0
+      ? merged
+      : hints.length > 0
+      ? hints.slice(0, 3).map((h) => ({
+          start: clamp(h.start, 0, text.length),
+          end: clamp(h.end, 0, text.length),
+          quote: text.slice(h.start, h.end).trim(),
+          offense: h.kind,
+          severity: 1 as 0 | 1 | 2 | 3,
+          rationale: "Heuristic lexicon/stereotype flag",
+        }))
+      : [];
+
+  const overall = reconcileOverall(gemini.overall_label, withFallback);
+  return { overall_label: overall, issues: withFallback };
 }
 
 function readTextField(response: unknown): string {
@@ -309,27 +343,19 @@ function readTextField(response: unknown): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Gemini calls (unchanged behavior, now fed with richer hints)
+// Gemini calls (deterministic config + structured hints)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function callGeminiJSON({ text, hints }: { text: string; hints: Hint[] }) {
   const system =
-    `To enn evalyatris bien strik pou sekirite ek zistis (fairness) pou text ki utilizater fer. Retourne JSON avek bann spans kot ena konteni problematik pou ed enn moderater imen.\n\n` +
-    `Regleman:\n` +
-    `- Detekte: toxicity (insilt, azirman), haine/bias (klas proteze, stereotip), menas/violans, seksual (inklir minor), self-harm, bullying, spam, lenformasion fos (misinformation), bias, stereotip.\n` +
-    `- Donn exak pozision karakte [start,end) dan TEXT ORIZINAL (0-indexed, JS slicing).\n` +
-    `- Gard "quote" kourt; prefer fraz minim ki ofansan.\n` +
-    `- Severity: 0=inofansif, 1=ba, 2=moyen, 3=ot (retir/escalade).\n` +
-    `- Reste konservatif me pa rate bann violasion evidan.\n` +
-    `- Si pena nanye problematik: retourne issues: [].`;
+    `Ou pou fer enn klasifikasion sekirite/justis. Retourne JSON VALID ki swiv schema (AUCUN lot text). ` +
+    `Donne spans [start,end) 0-indexed lor TEXT ORIZINAL. Severity: 0..3. Si pena problem: issues: [].`;
 
-  const hintLines = hints
-    .slice(0, 12)
-    .map(
-      (h, i) => `#${i + 1} ${h.kind} @ ${h.start}-${h.end}: "${h.quote.replace(/\n/g, " ").slice(0, 120)}"`
-    )
-    .join("\n");
-  const hintBlock = hints.length ? `\n\nIndikasion eiristik (kapav inkomplé; verifye bien):\n${hintLines}` : "";
+  // NOTE: no `as const` — keep these arrays mutable to satisfy PartUnion[] typing
+  const contents = [
+    { role: "user" as const, parts: [{ text: `TEXT:\n${text}` }] },
+    { role: "user" as const, parts: [{ text: `HINTS_JSON:\n${JSON.stringify(hints.slice(0, 24))}` }] },
+  ];
 
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -337,13 +363,8 @@ async function callGeminiJSON({ text, hints }: { text: string; hints: Hint[] }) 
   try {
     const response = await ai.models.generateContent({
       model: MODEL,
-      contents: [{ role: "user", parts: [{ text }] }],
-      config: {
-        systemInstruction: system + hintBlock,
-        responseMimeType: "application/json",
-        responseSchema,
-        temperature: 0.2,
-      },
+      contents, // mutable arrays
+      config: { systemInstruction: system, ...GEN_CFG },
       // @ts-expect-error – some SDK versions don't type `signal`
       signal: controller.signal,
     });
@@ -354,33 +375,18 @@ async function callGeminiJSON({ text, hints }: { text: string; hints: Hint[] }) 
   }
 }
 
+// UPDATED: retry uses identical request/config for determinism
 async function analyzeWithRepair(text: string, hints: Hint[]): Promise<AnalysisResult> {
   const raw = await callGeminiJSON({ text, hints });
   try {
     const parsed = JSON.parse(raw) as GeminiAnalysis;
-    return postProcess(parsed, text);
+    return postProcess(parsed, text, hints);
   } catch {
-    // fall through to stricter retry
+    // Re-issue the SAME deterministic request (handles transient parse issues)
+    const raw2 = await callGeminiJSON({ text, hints });
+    const parsed2 = JSON.parse(raw2) as GeminiAnalysis;
+    return postProcess(parsed2, text, hints);
   }
-
-  const stricter = `Retourne SELMAN JSON valid. Pa met okenn komanter ouswa markdown. Servi exak non-la-champs ek tip valer dan schema.`;
-  const response2 = await ai.models.generateContent({
-    model: MODEL,
-    contents: [
-      { role: "user", parts: [{ text: `Text pou analiz:\n${text}` }] },
-      { role: "user", parts: [{ text: `Servi sa schema-la ek prodwir JSON selman.` }] },
-    ],
-    config: {
-      systemInstruction: stricter,
-      responseMimeType: "application/json",
-      responseSchema,
-      temperature: 0.1,
-    },
-  });
-
-  const raw2 = readTextField(response2);
-  const parsed2 = JSON.parse(raw2) as GeminiAnalysis;
-  return postProcess(parsed2, text);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
