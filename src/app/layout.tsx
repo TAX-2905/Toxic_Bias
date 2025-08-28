@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ToxiBias",
+  title: "MorisGuard",
   description: "Test Version ONLY and NOT final",
 };
 

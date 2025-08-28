@@ -1,13 +1,26 @@
-/* Add this to styles/globals.css and import from app/layout.tsx */
+/* styles/globals.css */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: light; }
+/* Tell the browser which color schemes you handle and switch with .dark */
+@layer base {
+  :root { color-scheme: light; }
+  .dark { color-scheme: dark; }
+}
 
 /* Better mark element */
 mark { transition: box-shadow .2s ease; }
 mark:hover { box-shadow: 0 0 0 4px rgba(0,0,0,0.06) inset; }
+.dark mark:hover { box-shadow: 0 0 0 4px rgba(255,255,255,0.08) inset; }
 
 /* Scrollbar subtle */
 * { scrollbar-width: thin; scrollbar-color: #d4d4d4 transparent; }
+.dark * { scrollbar-color: #3f3f46 transparent; } /* darker thumb in dark mode */
+
+/* Optional: nicer WebKit scrollbars */
+@supports selector(::-webkit-scrollbar) {
+  :root::-webkit-scrollbar { width: 8px; height: 8px; }
+  :root::-webkit-scrollbar-thumb { background: #d4d4d4; border-radius: 999px; }
+  .dark::-webkit-scrollbar-thumb { background: #3f3f46; }
+}

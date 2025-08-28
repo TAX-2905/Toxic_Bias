@@ -1,4 +1,4 @@
-# 🛡️ ToxiBias Test — Real-time Text Moderation (Kreol Morisien)
+# 🛡️ MorisGuard — Real-time Text Moderation (Kreol Morisien)
 
 Minimal Next.js app that flags harmful spans in user text.
 Powered by **NLP** + **Generative AI** (Google Gemini) with a normalization & lexicon pre-pass tuned for Mauritian Creole/French.

@@ -365,13 +365,17 @@ useLayoutEffect(() => {
     <main className="min-h-dvh bg-gradient-to-b from-zinc-50 to-white">
       <div className="mx-auto max-w-4xl px-6 py-14">
         {/* Header */}
-        <header className="text-center mb-6">
-          <div className="mx-auto mb-4 w-14 h-14 rounded-2xl bg-zinc-900 text-white grid place-items-center shadow-sm">
-            <Shield size={24} />
-          </div>
-          <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">ToxiBias Test</h1>
-          {/* (Removed header Auto Read controls) */}
-        </header>
+<header className="text-center mb-2">
+<div className="mx-auto mb-1 rounded-2xl overflow-hidden">
+  <img
+    src="/waa.png"
+    alt="Brand logo"
+    className="w-20 h-20 object-cover"
+  />
+</div>
+
+  <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">MorisGuard</h1>
+</header>
 
         {/* Kart Antre */}
         <section className="rounded-3xl border bg-white shadow-sm p-6 md:p-8 mb-8">
