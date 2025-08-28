@@ -3,7 +3,7 @@
 import React, {
   useCallback,
   useEffect,
-  useLayoutEffect,  // <-- add this
+  useLayoutEffect, // <-- keep
   useMemo,
   useRef,
   useState,
@@ -11,7 +11,8 @@ import React, {
   useDeferredValue,
   memo,
 } from "react";
-import { Shield, Wand2, XCircle, Loader2, Volume2 } from "lucide-react";
+import * as Papa from "papaparse";
+import { Wand2, XCircle, Loader2, Volume2, Upload } from "lucide-react";
 import type { AnalysisResult, Issue } from "@/app/lib/schema";
 
 
@@ -56,10 +57,7 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
     if (!prev || cur.start > prev.end) out.push({ ...cur });
     else {
       prev.end = Math.max(prev.end, cur.end);
-      // choose strongest as canonical offense
-      if (cur.severity > prev.severity) {
-        prev.offense = cur.offense;
-      }
+      if (cur.severity > prev.severity) prev.offense = cur.offense;
       prev.severity = Math.max(prev.severity, cur.severity) as 0 | 1 | 2 | 3;
       prev.rationale = `${prev.rationale}\n— ${cur.rationale}`;
       if ((cur.quote?.length ?? 0) > (prev.quote?.length ?? 0)) prev.quote = cur.quote;
@@ -68,8 +66,46 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
   return out;
 }
 
-const Segmented = memo(function Segmented({ text, issues }: { text: string; issues: Issue[] }) {
-  // Defer heavy text splitting to keep typing responsive
+// Helper pou style selil dapre max severite dan li
+function maxSeverity(issues: Issue[]): 0 | 1 | 2 | 3 | null {
+  if (!issues || issues.length === 0) return null;
+  return issues.reduce((acc, i) => (i.severity > acc ? i.severity : acc), 0 as 0 | 1 | 2 | 3);
+}
+
+// --- delimiter guesser (top-level, outside the component) ---
+const guessDelimiter = (sample: string) => {
+  const candidates = [",", ";", "\t", "|"] as const;
+  const lines = sample
+    .split(/\r?\n/)
+    .filter((l) => l.trim().length > 0)
+    .slice(0, 50);
+
+  let best: string = ",";
+  let bestScore = -Infinity;
+
+  for (const d of candidates) {
+    const counts = lines.map((l) => l.split(d).length);
+    if (counts.length === 0) continue;
+    const mean = counts.reduce((a, b) => a + b, 0) / counts.length;
+    const variance = counts.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / counts.length;
+    const score = mean - variance; // prefer more columns + consistency
+    if (score > bestScore) {
+      bestScore = score;
+      best = d;
+    }
+  }
+  return best;
+};
+
+const Segmented = memo(function Segmented({
+  text,
+  issues,
+  compact = false,
+}: {
+  text: string;
+  issues: Issue[];
+  compact?: boolean;
+}) {
   const deferredText = useDeferredValue(text);
 
   const segments = useMemo(() => {
@@ -88,8 +124,14 @@ const Segmented = memo(function Segmented({ text, issues }: { text: string; issu
   }, [deferredText, issues]);
 
   return (
-    <div className="prose prose-zinc max-w-none">
-      <p className="whitespace-pre-wrap leading-8 text-zinc-900 text-[17px]">
+    <div className={compact ? "max-w-none" : "prose prose-zinc max-w-none"}>
+      <p
+        className={
+          compact
+            ? "m-0 whitespace-pre-wrap leading-6 text-zinc-900 text-[14px]"
+            : "whitespace-pre-wrap leading-8 text-zinc-900 text-[17px]"
+        }
+      >
         {segments.map((s) =>
           s.issue ? (
             <mark
@@ -115,13 +157,15 @@ const Summary = memo(function Summary({ result }: { result: AnalysisResult }) {
     return acc;
   }, [result.issues]);
 
-  const pill = useMemo(() => (
-    result.overall_label === "unsafe"
-      ? "bg-rose-50 border-rose-200 text-rose-800"
-      : result.overall_label === "risky"
-      ? "bg-amber-50 border-amber-200 text-amber-800"
-      : "bg-emerald-50 border-emerald-200 text-emerald-800"
-  ), [result.overall_label]);
+  const pill = useMemo(
+    () =>
+      result.overall_label === "unsafe"
+        ? "bg-rose-50 border-rose-200 text-rose-800"
+        : result.overall_label === "risky"
+        ? "bg-amber-50 border-amber-200 text-amber-800"
+        : "bg-emerald-50 border-emerald-200 text-emerald-800",
+    [result.overall_label]
+  );
 
   return (
     <div className="grid gap-4 sm:grid-cols-2">
@@ -149,7 +193,13 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const [, startTransition] = useTransition();
+
+  // --- CSV state (auto analyze + highlight per cell) ---
+  const [csvData, setCsvData] = useState<string[][] | null>(null);
+  const [csvResults, setCsvResults] = useState<Record<string, AnalysisResult | null>>({});
+  const [csvLoading, setCsvLoading] = useState(false);
+  const csvAbortRef = useRef<AbortController | null>(null);
 
   // --- Auto Read (TTS)
   const [autoRead, setAutoRead] = useState(false);
@@ -157,7 +207,7 @@ export default function Page() {
   const [ttsSupported, setTtsSupported] = useState(false);
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const canceledRef = useRef(false); // tracks manual cancel vs. natural end
+  const canceledRef = useRef(false);
   const lastAnalyzedTextRef = useRef<string | null>(null);
 
   // Abort in-flight requests if user re-clicks Analyze rapidly
@@ -194,11 +244,10 @@ export default function Page() {
     if (!supported) return;
     selectMauritianLikeVoice();
     const handleVoicesChanged = () => selectMauritianLikeVoice();
-    // onvoiceschanged works in more browsers; addEventListener is also supported
-    window.speechSynthesis.onvoiceschanged = handleVoicesChanged;
+    (window.speechSynthesis as any).onvoiceschanged = handleVoicesChanged;
     return () => {
       if (window.speechSynthesis.onvoiceschanged === handleVoicesChanged) {
-        window.speechSynthesis.onvoiceschanged = null as unknown as any;
+        (window.speechSynthesis as any).onvoiceschanged = null;
       }
     };
   }, [selectMauritianLikeVoice]);
@@ -207,63 +256,55 @@ export default function Page() {
     if (!ttsSupported) return;
     try {
       canceledRef.current = true;
-      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+      if (window.speechSynthesis.speaking || (window as any).speechSynthesis.pending) {
         window.speechSynthesis.cancel();
       }
     } catch {}
     if (isSpeaking) setIsSpeaking(false);
   }, [ttsSupported, isSpeaking]);
 
-  const speakText = useCallback((t: string) => {
-    if (!ttsSupported || !autoRead || !t.trim()) return;
-    const synth = window.speechSynthesis;
+  const speakText = useCallback(
+    (t: string) => {
+      if (!ttsSupported || !autoRead || !t.trim()) return;
+      const synth = window.speechSynthesis;
 
-    try {
-      if (!voiceRef.current) selectMauritianLikeVoice();
+      try {
+        if (!voiceRef.current) selectMauritianLikeVoice();
+        stopSpeaking();
 
-      // Stop any current speech first.
-      stopSpeaking();
+        const u = new SpeechSynthesisUtterance("\u2060" + t);
+        if (voiceRef.current) {
+          u.voice = voiceRef.current;
+          u.lang = voiceRef.current.lang || "fr-FR";
+        } else {
+          u.lang = "fr-FR";
+        }
+        u.rate = 1;
+        u.pitch = 1;
 
-      const u = new SpeechSynthesisUtterance("\u2060" + t); // zero-width char to avoid clipping
-      if (voiceRef.current) {
-        u.voice = voiceRef.current;
-        u.lang = voiceRef.current.lang || "fr-FR";
-      } else {
-        u.lang = "fr-FR";
-      }
-      u.rate = 1;
-      u.pitch = 1;
+        u.onstart = () => setIsSpeaking(true);
+        u.onend = () => {
+          setIsSpeaking(false);
+          if (!canceledRef.current) setAutoRead(false);
+        };
+        u.onerror = () => {
+          setIsSpeaking(false);
+          setAutoRead(false);
+        };
 
-      u.onstart = () => {
-        setIsSpeaking(true);
-      };
+        utteranceRef.current = u;
 
-      u.onend = () => {
-        setIsSpeaking(false);
-        // Only auto-uncheck when it *finished* naturally (not via cancel()).
-        if (!canceledRef.current) setAutoRead(false);
-      };
-
-      u.onerror = () => {
-        setIsSpeaking(false);
-        // Also uncheck on error to avoid a stuck "on" state.
-        setAutoRead(false);
-      };
-
-      utteranceRef.current = u;
-
-      // Delay after cancel() to avoid first-word truncation; reset cancel flag just before speaking.
-      setTimeout(() => {
-        try {
-          canceledRef.current = false;
-          if (synth.paused) synth.resume();
-          synth.speak(u);
-        } catch {}
-      }, 120);
-    } catch {
-      // ignore
-    }
-  }, [ttsSupported, autoRead, selectMauritianLikeVoice, stopSpeaking]);
+        setTimeout(() => {
+          try {
+            canceledRef.current = false;
+            if ((synth as any).paused) synth.resume();
+            synth.speak(u);
+          } catch {}
+        }, 120);
+      } catch {}
+    },
+    [ttsSupported, autoRead, selectMauritianLikeVoice, stopSpeaking]
+  );
 
   // Toggling the checkbox: check = speak now; uncheck = stop now.
   useEffect(() => {
@@ -274,21 +315,33 @@ export default function Page() {
   }, [autoRead, ttsSupported]);
 
   // --- Textarea autosize
-const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
 
-const autoSize = useCallback((el: HTMLTextAreaElement | null) => {
-  if (!el) return;
-  // reset height then grow to content
-  el.style.height = "0px";
-  // cap to 85% of viewport height for sanity; remove Math.min(...) if you truly want unlimited growth
-  el.style.height = Math.min(el.scrollHeight, Math.floor(window.innerHeight * 0.85)) + "px";
-}, []);
+  const autoSize = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = Math.min(el.scrollHeight, Math.floor(window.innerHeight * 0.85)) + "px";
+  }, []);
 
-// keep height in sync when text changes (including programmatic changes)
-useLayoutEffect(() => {
-  autoSize(taRef.current);
-}, [autoSize, text]);
+  useLayoutEffect(() => {
+    autoSize(taRef.current);
+  }, [autoSize, text]);
 
+  const postAnalyze = useCallback(
+    async (payloadText: string, controller?: AbortController) => {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: payloadText }),
+        signal: controller?.signal,
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`Erer API ${res.status}`);
+      const data: AnalysisResult = await res.json();
+      return data;
+    },
+    []
+  );
 
   const analyze = useCallback(async () => {
     if (!text.trim()) return;
@@ -307,42 +360,46 @@ useLayoutEffect(() => {
     abortRef.current = controller;
 
     try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: controller.signal,
-        // small perf win on Next edge/runtime
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`Erer API ${res.status}`);
-      const data: AnalysisResult = await res.json();
-
-      // transition prevents heavy segmentation from blocking the button spinner
+      const data = await postAnalyze(text, controller);
       startTransition(() => {
         setResult(data);
-        lastAnalyzedTextRef.current = text; // <-- remember which text was analyzed
+        lastAnalyzedTextRef.current = text;
       });
 
       // Si Auto Read on — lir text ki itilizater finn avoy
       speakText(text);
     } catch (e: any) {
-      if (e?.name === "AbortError") return; // ignore aborted requests
+      if (e?.name === "AbortError") return;
       setError(e?.message ?? "Erer inkoni");
     } finally {
       setLoading(false);
     }
-  }, [text, result, speakText, startTransition]);
+  }, [text, speakText, startTransition, postAnalyze]);
 
-  const resetAll = useCallback(() => {
-    setText("");
-    setResult(null);
-    setError(null);
-    stopSpeaking();
-  }, [stopSpeaking]);
+// Replace your current resetAll with this
+
+// 3) REPLACE resetAll with this (also clears the file input so you can re-upload)
+const resetAll = useCallback(() => {
+  if (abortRef.current) abortRef.current.abort();
+  if (csvAbortRef.current) csvAbortRef.current.abort();
+
+  setText("");
+  setResult(null);
+  setError(null);
+  lastAnalyzedTextRef.current = null;
+
+  setCsvData(null);
+  setCsvResults({});
+  setCsvLoading(false);
+
+  // clear chosen file so the same CSV can be picked again
+  if (fileInputRef.current) fileInputRef.current.value = "";
+
+  stopSpeaking();
+}, [stopSpeaking]);
 
 
-  // Auto-clear results if user edits after running an analysis
+
   useEffect(() => {
     // Only act if we have a “last analyzed” snapshot and the text has changed
     if (!lastAnalyzedTextRef.current) return;
@@ -359,41 +416,120 @@ useLayoutEffect(() => {
     lastAnalyzedTextRef.current = null;
   }, [text, stopSpeaking]);
 
+  // 1) ADD near other refs/state in your Page() component
+const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+
+  // --- CSV helpers: auto-analyze after upload and highlight per cell ---
+  const analyzeCsv = useCallback(
+    async (rows: string[][]) => {
+      // cancel previous CSV batch if any
+      if (csvAbortRef.current) csvAbortRef.current.abort();
+      const batchController = new AbortController();
+      csvAbortRef.current = batchController;
+
+      setCsvResults({});
+      setCsvLoading(true);
+
+      // Prepare list of cells to scan (only non-empty)
+      const jobs: { r: number; c: number; text: string }[] = [];
+      for (let r = 0; r < rows.length; r++) {
+        for (let c = 0; c < rows[r].length; c++) {
+          const cellText = (rows[r][c] ?? "").toString();
+          if (cellText.trim().length > 0) jobs.push({ r, c, text: cellText });
+        }
+      }
+
+      const BATCH = 6;
+
+      try {
+        for (let i = 0; i < jobs.length; i += BATCH) {
+          const slice = jobs.slice(i, i + BATCH);
+          await Promise.all(
+            slice.map(async ({ r, c, text }) => {
+              const key = `${r}-${c}`;
+              try {
+                const data = await postAnalyze(text, batchController);
+                setCsvResults((prev) => ({ ...prev, [key]: data }));
+              } catch (e: any) {
+                if (e?.name === "AbortError") return;
+                setCsvResults((prev) => ({ ...prev, [key]: null }));
+              }
+            })
+          );
+        }
+      } finally {
+        setCsvLoading(false);
+      }
+    },
+    [postAnalyze]
+  );
+
+  const handleCsvUpload = useCallback(
+    async (file: File) => {
+      try {
+        const sample = await file.slice(0, 256 * 1024).text();
+        const delimiter = guessDelimiter(sample);
+
+        Papa.parse<string[]>(file, {
+          delimiter,
+          skipEmptyLines: "greedy",
+          complete: (res: Papa.ParseResult<string[]>) => {
+            const fatal = (res.errors || []).filter(
+              (e) => e.code && e.code !== "UndetectableDelimiter"
+            );
+            if (fatal.length) {
+              setError("Pa kapav lir CSV: " + (fatal[0]?.message ?? "Parse error"));
+              return;
+            }
+            const rows = (res.data as unknown as string[][]).map((r) =>
+              r.map((v) => (v == null ? "" : String(v)))
+            );
+            setCsvData(rows);
+            analyzeCsv(rows); // auto-run, then render highlight table
+          },
+          error: (err: Error) => {
+            setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
+          },
+        });
+      } catch (err: any) {
+        setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
+      }
+    },
+    [analyzeCsv]
+  );
 
   return (
     <main className="min-h-dvh bg-gradient-to-b from-zinc-50 to-white">
       <div className="mx-auto max-w-4xl px-6 py-14">
         {/* Header */}
-<header className="text-center mb-2">
-<div className="mx-auto mb-1 rounded-2xl overflow-hidden">
-  <img
-    src="/waa.png"
-    alt="Brand logo"
-    className="w-20 h-20 object-cover"
-  />
-</div>
+      <div className="mx-auto max-w-4xl px-6 py-14">
+        {/* Header */}
+            <img src="/waa.png" alt="Brand logo" className="w-20 h-20 object-cover" />
+          </div>
 
-  <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">MorisGuard</h1>
-</header>
+          <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">MorisGuard</h1>
 
-        {/* Kart Antre */}
+
+        {/* Kart Antre (TEXT) */}
         <section className="rounded-3xl border bg-white shadow-sm p-6 md:p-8 mb-8">
           <label htmlFor="input" className="block text-sm font-medium text-zinc-700 mb-2">
             Paragraph
           </label>
           <textarea
-  id="input"
-  ref={taRef}
-  value={text}
-  onInput={useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setText(e.target.value);
-    autoSize(e.currentTarget);
-  }, [autoSize])}
-  placeholder="Met 1 text ici pou analizer…"
-  className="w-full h-auto min-h-[10vh] md:min-h-[10vh] rounded-2xl border border-zinc-200 focus:ring-2 focus:ring-zinc-900/10 focus:outline-none p-5 bg-zinc-50/40 text-[16px] leading-7 overflow-hidden resize-none"
-/>
-
+            id="input"
+            ref={taRef}
+            value={text}
+            onInput={useCallback(
+              (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+                setText(e.target.value);
+                autoSize(e.currentTarget);
+              },
+              [autoSize]
+            )}
+            placeholder="Met 1 text ici pou analizer…"
+            className="w-full h-auto min-h-[10vh] md:min-h-[10vh] rounded-2xl border border-zinc-200 focus:ring-2 focus:ring-zinc-900/10 focus:outline-none p-5 bg-zinc-50/40 text-[16px] leading-7 overflow-hidden resize-none"
+          />
 
           {/* Aksion */}
           <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -414,7 +550,27 @@ useLayoutEffect(() => {
               <XCircle size={16} /> Reffacer
             </button>
 
-            {/* Auto Read toggle next to Reffacer */}
+            {/* Attach CSV (next to Reffacer) */}
+            <label className="inline-flex items-center gap-2 rounded-2xl bg-white border px-4 py-2 text-sm cursor-pointer hover:bg-zinc-100">
+              <Upload size={16} />
+              <span>Attach CSV</span>
+<input
+  ref={fileInputRef}
+  type="file"
+  accept=".csv,text/csv"
+  className="hidden"
+  onClick={(e) => {
+    // ensure selecting the same file triggers onChange again
+    (e.currentTarget as HTMLInputElement).value = "";
+  }}
+  onChange={(e) => {
+    const f = e.target.files?.[0];
+    if (f) handleCsvUpload(f);
+  }}
+/>
+            </label>
+
+            {/* Auto Read toggle */}
             <label className="inline-flex items-center gap-2 text-sm text-zinc-700">
               <input
                 type="checkbox"
@@ -432,14 +588,58 @@ useLayoutEffect(() => {
           </div>
         </section>
 
-        {/* Rezilta */}
+        {/* CSV highlight table */}
+        {csvData && (
+          <section className="rounded-3xl border bg-white shadow-sm p-6 md:p-8 mb-8">
+            <div className="flex items-center gap-3 mb-3">
+              {csvLoading && (
+                <span className="inline-flex items-center gap-2 text-sm text-zinc-600">
+                  <Loader2 className="animate-spin" size={16} /> Pe analiz CSV…
+                </span>
+              )}
+            </div>
+            <div className="mt-2 overflow-auto">
+              <table className="w-full table-auto border-collapse text-left">
+                <tbody>
+                  {csvData.map((row, r) => (
+                    <tr key={r} className="border-b last:border-b-0">
+                      {row.map((cell, c) => {
+                        const key = `${r}-${c}`;
+                        const res = csvResults[key] || null;
+                        const ms = res ? maxSeverity(res.issues) : null;
+                        const cellTint = ms == null ? "" : SEVERITY_STYLE[ms].replace(/text-[^\s]+/g, ""); // keep bg & ring only
+                        return (
+                          <td key={key} className="align-top p-2 border-b-0">
+                            <div className={`rounded-xl px-2 py-1 ${cellTint}`}>
+                              {res ? (
+                                res.issues.length > 0 ? (
+                                  <Segmented text={cell} issues={res.issues} compact />
+                                ) : (
+                                  <span className="text-zinc-700 text-sm whitespace-pre-wrap">{cell}</span>
+                                )
+                              ) : (
+                                <span className="text-zinc-700 text-sm whitespace-pre-wrap">{cell}</span>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {/* Rezilta (TEXT) */}
         {error && (
           <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-rose-800 flex items-start gap-2 mb-8">
             <XCircle className="mt-0.5" size={18} /> {error}
           </div>
         )}
 
-        {!result && !error && (
+        {!result && !error && !csvData && (
           <section className="rounded-3xl border bg-white p-8 text-zinc-600 text-center">
             <p className="text-lg">Lans enn analiz pou gete bann parti ki pa appropriate.</p>
           </section>
@@ -473,7 +673,7 @@ useLayoutEffect(() => {
                           {iss.start}–{iss.end}
                         </span>
                       </div>
-                      <div className="text-sm text-zinc-700 italic">“{iss.quote}”</div>
+                      {iss.quote && <div className="text-sm text-zinc-700 italic">“{iss.quote}”</div>}
                       <div className="text-xs text-zinc-500 mt-1">{iss.rationale}</div>
                     </li>
                   ))}
@@ -484,12 +684,12 @@ useLayoutEffect(() => {
         )}
 
         {/* Footer */}
-        <footer className="mt-14 border-t pt-6 text-center text-sm text-zinc-500">
-          TAX — All Right Reserved
-        </footer>
+        <footer className="mt-14 border-t pt-6 text-center text-sm text-zinc-500">TAX — All Right Reserved</footer>
       </div>
     </main>
   );
 }
+
+
 
 
