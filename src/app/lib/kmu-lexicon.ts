@@ -21,6 +21,6 @@ export const LEXICON: Record<Bucket, string[]> = {
   ],
   violence: ["vyolans", "violence", "mor", "lamor", "mori", "die", "death", "lynch", "linch"],
   slur_bias: [
-  "falourmama", "gogote", "pilone", "madras", "nation", "lascar", "torma", "torpa", "morma", "morpa", "liki", "likimama", "kkliki", "bachara"
+  "falourmama", "gogote", "pilone", "madras", "nation", "lascar", "torma", "torpa", "morma", "morpa", "liki", "likimama", "kkliki", "bachara", "batiara", "kakaliki", "ggt"
   ],
 };

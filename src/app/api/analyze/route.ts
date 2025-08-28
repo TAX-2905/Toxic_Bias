@@ -186,7 +186,7 @@ function buildHints(text: string): Hint[] {
   const { norm, map } = normalizeForMatch(text, {
     foldDiacritics: true,
     lowercase: true,
-    repeatMax: 2, // ← was 1
+    repeatMax: 1, // ← was 1
   });
 
   const hints: Hint[] = [];
