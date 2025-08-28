@@ -500,15 +500,15 @@ const fileInputRef = useRef<HTMLInputElement | null>(null);
   );
 
   return (
-<main className="min-h-dvh bg-gradient-to-b from-zinc-50 to-white">
-  <div className="mx-auto max-w-4xl px-6 py-14 text-center">
-    {/* Header */}
-  <div className="mx-auto max-w-4xl px-6 py-14 text-center">
-    {/* Header */}
-      <img src="/waa.png" alt="Brand logo" className="w-20 h-20 object-cover" />
-    </div>
+    <main className="min-h-dvh bg-gradient-to-b from-zinc-50 to-white">
+      {/* was: <div className="mx-auto max-w-4xl px-6 py-14 text-center"> */}
+      <div className="mx-auto max-w-4xl px-6 py-14">
+        {/* Header (center only the brand area) */}
+        <header className="text-center mb-8">
+          <img src="/waa.png" alt="Brand logo" className="w-20 h-20 object-cover mx-auto" />
+          <h1 className="mt-2 text-3xl md:text-4xl font-semibold tracking-tight">MorisGuard</h1>
+        </header>
 
-    <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">MorisGuard</h1>
 
 
         {/* Kart Antre (TEXT) */}
