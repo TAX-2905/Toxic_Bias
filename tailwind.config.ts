@@ -1,5 +1,4 @@
 import type { Config } from "tailwindcss";
-import typography from "@tailwindcss/typography";
 
 const config: Config = {
   content: [
@@ -15,8 +14,7 @@ const config: Config = {
       },
     },
   },
-  plugins: [typography],
-  // Optional: if you build class names dynamically like `w-${size}`
+  plugins: [],
   // safelist: ["w-10","h-10","w-20","h-20"],
 };
 export default config;
