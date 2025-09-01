@@ -66,6 +66,22 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
   return out;
 }
 
+// ADD (top-level, near other helpers)
+function mergeSignals(...signals: (AbortSignal | null | undefined)[]) {
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  signals.filter(Boolean).forEach((s) => s!.addEventListener("abort", onAbort, { once: true }));
+  return {
+    signal: ctrl.signal,
+    cleanup() {
+      signals.filter(Boolean).forEach((s) => s!.removeEventListener("abort", onAbort));
+    },
+  };
+}
+
+const ANALYZE_TIMEOUT_MS =20000; // 20s per cell request
+
+
 // Helper pou style selil dapre max severite dan li
 function maxSeverity(issues: Issue[]): 0 | 1 | 2 | 3 | null {
   if (!issues || issues.length === 0) return null;
@@ -327,21 +343,32 @@ export default function Page() {
     autoSize(taRef.current);
   }, [autoSize, text]);
 
-  const postAnalyze = useCallback(
-    async (payloadText: string, controller?: AbortController) => {
+// REPLACE your current postAnalyze with this version (adds timeout + merged AbortSignals)
+const postAnalyze = useCallback(
+  async (payloadText: string, externalController?: AbortController) => {
+    const timeoutCtrl = new AbortController();
+    const timer = setTimeout(() => timeoutCtrl.abort(), ANALYZE_TIMEOUT_MS);
+    const { signal, cleanup } = mergeSignals(externalController?.signal, timeoutCtrl.signal);
+
+    try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: payloadText }),
-        signal: controller?.signal,
+        signal,
         cache: "no-store",
       });
       if (!res.ok) throw new Error(`Erer API ${res.status}`);
       const data: AnalysisResult = await res.json();
       return data;
-    },
-    []
-  );
+    } finally {
+      clearTimeout(timer);
+      cleanup();
+    }
+  },
+  []
+);
+
 
   const analyze = useCallback(async () => {
     if (!text.trim()) return;
@@ -421,83 +448,102 @@ const fileInputRef = useRef<HTMLInputElement | null>(null);
 
 
   // --- CSV helpers: auto-analyze after upload and highlight per cell ---
-  const analyzeCsv = useCallback(
-    async (rows: string[][]) => {
-      // cancel previous CSV batch if any
-      if (csvAbortRef.current) csvAbortRef.current.abort();
-      const batchController = new AbortController();
-      csvAbortRef.current = batchController;
+// REPLACE your analyzeCsv with this version
+const analyzeCsv = useCallback(
+  async (rows: string[][]) => {
+    if (csvAbortRef.current) csvAbortRef.current.abort();
+    const batchController = new AbortController();
+    csvAbortRef.current = batchController;
 
-      setCsvResults({});
-      setCsvLoading(true);
+    setCsvResults({});
+    setCsvLoading(true);
 
-      // Prepare list of cells to scan (only non-empty)
-      const jobs: { r: number; c: number; text: string }[] = [];
-      for (let r = 0; r < rows.length; r++) {
-        for (let c = 0; c < rows[r].length; c++) {
-          const cellText = (rows[r][c] ?? "").toString();
-          if (cellText.trim().length > 0) jobs.push({ r, c, text: cellText });
-        }
+    // Prepare list of non-empty cells to scan
+    const jobs: { r: number; c: number; text: string }[] = [];
+    for (let r = 0; r < rows.length; r++) {
+      for (let c = 0; c < rows[r].length; c++) {
+        const cellText = (rows[r][c] ?? "").toString();
+        if (cellText.trim().length > 0) jobs.push({ r, c, text: cellText });
       }
+    }
 
-      const BATCH = 6;
+    const BATCH = 6;
 
-      try {
-        for (let i = 0; i < jobs.length; i += BATCH) {
-          const slice = jobs.slice(i, i + BATCH);
-          await Promise.all(
-            slice.map(async ({ r, c, text }) => {
-              const key = `${r}-${c}`;
-              try {
-                const data = await postAnalyze(text, batchController);
-                setCsvResults((prev) => ({ ...prev, [key]: data }));
-              } catch (e: any) {
-                if (e?.name === "AbortError") return;
-                setCsvResults((prev) => ({ ...prev, [key]: null }));
-              }
-            })
-          );
-        }
-      } finally {
-        setCsvLoading(false);
-      }
-    },
-    [postAnalyze]
-  );
+    try {
+      for (let i = 0; i < jobs.length; i += BATCH) {
+        const slice = jobs.slice(i, i + BATCH);
+        // Use allSettled so one failure/hang (which we also timeout) doesn't block
+        const settled = await Promise.allSettled(
+          slice.map((job) => postAnalyze(job.text, batchController))
+        );
 
-  const handleCsvUpload = useCallback(
-    async (file: File) => {
-      try {
-        const sample = await file.slice(0, 256 * 1024).text();
-        const delimiter = guessDelimiter(sample);
-
-        Papa.parse<string[]>(file, {
-          delimiter,
-          skipEmptyLines: "greedy",
-          complete: (res: Papa.ParseResult<string[]>) => {
-            const fatal = (res.errors || []).filter(
-              (e) => e.code && e.code !== "UndetectableDelimiter"
-            );
-            if (fatal.length) {
-              setError("Pa kapav lir CSV: " + (fatal[0]?.message ?? "Parse error"));
-              return;
-            }
-            const rows = (res.data as unknown as string[][]).map((r) =>
-              r.map((v) => (v == null ? "" : String(v)))
-            );
-            setCsvData(rows);
-            analyzeCsv(rows); // auto-run, then render highlight table
-          },
-          error: (err: Error) => {
-            setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
-          },
+        settled.forEach((res, idx) => {
+          const { r, c } = slice[idx];
+          const key = `${r}-${c}`;
+          if (res.status === "fulfilled") {
+            setCsvResults((prev) => ({ ...prev, [key]: res.value }));
+          } else {
+            // Mark failed cells as null so the UI can still render the text
+            setCsvResults((prev) => ({ ...prev, [key]: null }));
+          }
         });
-      } catch (err: any) {
-        setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
+
+        // Yield to the UI so the spinner updates smoothly
+        await new Promise((r) => setTimeout(r, 0));
       }
-    },
-    [analyzeCsv]
-  );
+    } finally {
+      setCsvLoading(false);
+    }
+  },
+  [postAnalyze]
+);
+
+
+// REPLACE your handleCsvUpload with this version
+const handleCsvUpload = useCallback(
+  async (file: File) => {
+    try {
+      const sample = await file.slice(0, 256 * 1024).text();
+      const delimiter = guessDelimiter(sample);
+
+      Papa.parse<string[]>(file, {
+        delimiter,
+        worker: true,          // parse off the main thread
+        dynamicTyping: false,
+        skipEmptyLines: false, // <-- keep empty rows
+        complete: (res: Papa.ParseResult<string[]>) => {
+          const fatal = (res.errors || []).filter(
+            (e) => e.code && e.code !== "UndetectableDelimiter"
+          );
+          if (fatal.length) {
+            setError("Pa kapav lir CSV: " + (fatal[0]?.message ?? "Parse error"));
+            return;
+          }
+
+          // Normalize: strings only + pad all rows to same width
+          const raw = (res.data as unknown as string[][]).map((r) =>
+            r.map((v) => (v == null ? "" : String(v)))
+          );
+          const maxCols = raw.reduce((m, r) => Math.max(m, r.length), 0);
+          const rows = raw.map((r) =>
+            r.length < maxCols ? [...r, ...Array(maxCols - r.length).fill("")] : r
+          );
+
+          setCsvData(rows);
+          analyzeCsv(rows); // auto-run, then render
+        },
+        error: (err: Error) => {
+          setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
+        },
+      });
+    } catch (err: any) {
+      setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
+    }
+  },
+  [analyzeCsv]
+);
+
+
 
   return (
     <main className="min-h-dvh bg-gradient-to-b from-zinc-50 to-white">
