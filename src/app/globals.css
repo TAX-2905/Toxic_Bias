@@ -2,6 +2,10 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+@import "tailwindcss";
+/* Tell Tailwind where your classNames live */
+@source "./app/**/*.{ts,tsx,js,jsx,mdx}" "./components/**/*.{ts,tsx,js,jsx,mdx}" "./lib/**/*.{ts,tsx,js,jsx,mdx}";
+
 
 /* Tell the browser which color schemes you handle and switch with .dark */
 @layer base {

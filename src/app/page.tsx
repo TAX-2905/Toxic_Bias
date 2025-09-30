@@ -12,13 +12,11 @@ import React, {
   memo,
 } from "react";
 import * as Papa from "papaparse";
-import { Wand2, XCircle, Loader2, Volume2, Upload } from "lucide-react";
+import { Wand2, XCircle, Loader2, Upload } from "lucide-react";
 import type { AnalysisResult, Issue } from "@/app/lib/schema";
 
-
-
 // Palet: neutre kalm avek ti tint dapre severite
-const SEVERITY_STYLE: Record<number, string> = {
+const SEVERITY_STYLE: Record<0 | 1 | 2 | 3, string> = {
   0: "bg-emerald-50 ring-emerald-200 text-emerald-800",
   1: "bg-amber-50 ring-amber-200 text-amber-800",
   2: "bg-orange-50 ring-orange-200 text-orange-800",
@@ -66,6 +64,16 @@ function mergeOverlaps(issues: Issue[]): Issue[] {
   return out;
 }
 
+// Derive overall label from issues: 0 -> safe, 1 -> risky, >=2 -> unsafe
+function deriveOverallLabel(issues: Issue[]): AnalysisResult["overall_label"] {
+  if (!issues || issues.length === 0) return "safe";
+  const m = maxSeverity(issues);
+  if (m === null || m === 0) return "safe";
+  if (m === 1) return "risky";
+  return "unsafe";
+}
+
+
 // ADD (top-level, near other helpers)
 function mergeSignals(...signals: (AbortSignal | null | undefined)[]) {
   const ctrl = new AbortController();
@@ -79,8 +87,7 @@ function mergeSignals(...signals: (AbortSignal | null | undefined)[]) {
   };
 }
 
-const ANALYZE_TIMEOUT_MS =20000; // 20s per cell request
-
+const ANALYZE_TIMEOUT_MS = 20000; // 20s per cell request
 
 // Helper pou style selil dapre max severite dan li
 function maxSeverity(issues: Issue[]): 0 | 1 | 2 | 3 | null {
@@ -173,27 +180,32 @@ const Summary = memo(function Summary({ result }: { result: AnalysisResult }) {
     return acc;
   }, [result.issues]);
 
+  // NEW: compute overall based on severities
+  const overall = useMemo(() => deriveOverallLabel(result.issues), [result.issues]);
+
+  // CHANGED: pill color now uses derived "overall"
   const pill = useMemo(
     () =>
-      result.overall_label === "unsafe"
+      overall === "unsafe"
         ? "bg-rose-50 border-rose-200 text-rose-800"
-        : result.overall_label === "risky"
+        : overall === "risky"
         ? "bg-amber-50 border-amber-200 text-amber-800"
         : "bg-emerald-50 border-emerald-200 text-emerald-800",
-    [result.overall_label]
+    [overall]
   );
 
   return (
     <div className="grid gap-4 sm:grid-cols-2">
       <div className={`rounded-2xl border p-4 ${pill}`}>
         <div className="text-sm">Feedback zeneral</div>
-        <div className="text-2xl font-semibold mt-1">{OVERALL_LABELS[result.overall_label]}</div>
+        {/* CHANGED: show derived label text */}
+        <div className="text-2xl font-semibold mt-1">{OVERALL_LABELS[overall]}</div>
       </div>
       <div className="rounded-2xl border p-4 bg-white">
         <div className="text-sm text-zinc-600">Kont severite</div>
         <div className="mt-2 flex gap-2">
           {[0, 1, 2, 3].map((s) => (
-            <div key={s} className={`rounded-xl ring-1 px-3 py-2 text-sm ${SEVERITY_STYLE[s]}`}>
+            <div key={s} className={`rounded-xl ring-1 px-3 py-2 text-sm ${SEVERITY_STYLE[s as 0 | 1 | 2 | 3]}`}>
               <span className="font-semibold mr-1">{s}</span>
               {counts[s as 0 | 1 | 2 | 3]}
             </div>
@@ -203,6 +215,7 @@ const Summary = memo(function Summary({ result }: { result: AnalysisResult }) {
     </div>
   );
 });
+
 
 export default function Page() {
   const [text, setText] = useState("");
@@ -217,23 +230,17 @@ export default function Page() {
   const [csvLoading, setCsvLoading] = useState(false);
   const csvAbortRef = useRef<AbortController | null>(null);
 
-  // --- Auto Read (TTS)
-  const [autoRead, setAutoRead] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [ttsSupported, setTtsSupported] = useState(false);
-  const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
-  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const canceledRef = useRef(false);
   const lastAnalyzedTextRef = useRef<string | null>(null);
 
   // Abort in-flight requests if user re-clicks Analyze rapidly
   const abortRef = useRef<AbortController | null>(null);
 
+  // Voice helper (completed and kept)
   const selectMauritianLikeVoice = useCallback(() => {
     try {
       const synth = window.speechSynthesis;
-      const voices = synth.getVoices();
-      if (!voices || voices.length === 0) return;
+      const voices = synth.getVoices?.() ?? [];
+      if (!voices || voices.length === 0) return null;
       const preferredNames = [
         "Google français",
         "Google Français",
@@ -246,89 +253,11 @@ export default function Page() {
       const frenchVoices = voices.filter((v) => v.lang?.toLowerCase().startsWith("fr"));
       const byName = frenchVoices.find((v) => preferredNames.includes(v.name.toLowerCase()));
       const next = byName || frenchVoices[0] || null;
-      // avoid useless reassignments
-      if (voiceRef.current?.name !== next?.name) voiceRef.current = next;
+      return next ?? null;
     } catch {
-      voiceRef.current = null;
+      return null;
     }
   }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const supported = "speechSynthesis" in window;
-    setTtsSupported(supported);
-    if (!supported) return;
-    selectMauritianLikeVoice();
-    const handleVoicesChanged = () => selectMauritianLikeVoice();
-    (window.speechSynthesis as any).onvoiceschanged = handleVoicesChanged;
-    return () => {
-      if (window.speechSynthesis.onvoiceschanged === handleVoicesChanged) {
-        (window.speechSynthesis as any).onvoiceschanged = null;
-      }
-    };
-  }, [selectMauritianLikeVoice]);
-
-  const stopSpeaking = useCallback(() => {
-    if (!ttsSupported) return;
-    try {
-      canceledRef.current = true;
-      if (window.speechSynthesis.speaking || (window as any).speechSynthesis.pending) {
-        window.speechSynthesis.cancel();
-      }
-    } catch {}
-    if (isSpeaking) setIsSpeaking(false);
-  }, [ttsSupported, isSpeaking]);
-
-  const speakText = useCallback(
-    (t: string) => {
-      if (!ttsSupported || !autoRead || !t.trim()) return;
-      const synth = window.speechSynthesis;
-
-      try {
-        if (!voiceRef.current) selectMauritianLikeVoice();
-        stopSpeaking();
-
-        const u = new SpeechSynthesisUtterance("\u2060" + t);
-        if (voiceRef.current) {
-          u.voice = voiceRef.current;
-          u.lang = voiceRef.current.lang || "fr-FR";
-        } else {
-          u.lang = "fr-FR";
-        }
-        u.rate = 1;
-        u.pitch = 1;
-
-        u.onstart = () => setIsSpeaking(true);
-        u.onend = () => {
-          setIsSpeaking(false);
-          if (!canceledRef.current) setAutoRead(false);
-        };
-        u.onerror = () => {
-          setIsSpeaking(false);
-          setAutoRead(false);
-        };
-
-        utteranceRef.current = u;
-
-        setTimeout(() => {
-          try {
-            canceledRef.current = false;
-            if ((synth as any).paused) synth.resume();
-            synth.speak(u);
-          } catch {}
-        }, 120);
-      } catch {}
-    },
-    [ttsSupported, autoRead, selectMauritianLikeVoice, stopSpeaking]
-  );
-
-  // Toggling the checkbox: check = speak now; uncheck = stop now.
-  useEffect(() => {
-    if (!ttsSupported) return;
-    if (autoRead) speakText(text);
-    else stopSpeaking();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRead, ttsSupported]);
 
   // --- Textarea autosize
   const taRef = useRef<HTMLTextAreaElement | null>(null);
@@ -343,37 +272,36 @@ export default function Page() {
     autoSize(taRef.current);
   }, [autoSize, text]);
 
-// REPLACE your current postAnalyze with this version (adds timeout + merged AbortSignals)
-const postAnalyze = useCallback(
-  async (payloadText: string, externalController?: AbortController) => {
-    const timeoutCtrl = new AbortController();
-    const timer = setTimeout(() => timeoutCtrl.abort(), ANALYZE_TIMEOUT_MS);
-    const { signal, cleanup } = mergeSignals(externalController?.signal, timeoutCtrl.signal);
+  // REPLACE your current postAnalyze with this version (adds timeout + merged AbortSignals)
+  const postAnalyze = useCallback(
+    async (payloadText: string, externalController?: AbortController) => {
+      const timeoutCtrl = new AbortController();
+      const timer = setTimeout(() => timeoutCtrl.abort(), ANALYZE_TIMEOUT_MS);
+      const { signal, cleanup } = mergeSignals(externalController?.signal, timeoutCtrl.signal);
 
-    try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: payloadText }),
-        signal,
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`Erer API ${res.status}`);
-      const data: AnalysisResult = await res.json();
-      return data;
-    } finally {
-      clearTimeout(timer);
-      cleanup();
-    }
-  },
-  []
-);
-
+      try {
+        const res = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: payloadText }),
+          signal,
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`Erer API ${res.status}`);
+        const data: AnalysisResult = await res.json();
+        return data;
+      } finally {
+        clearTimeout(timer);
+        cleanup();
+      }
+    },
+    []
+  );
 
   const analyze = useCallback(async () => {
     if (!text.trim()) return;
     // NEW: short-circuit identical re-runs to avoid flips
-    //if (lastAnalyzedTextRef.current === text && result) return;
+    // if (lastAnalyzedTextRef.current === text && result) return;
 
     setLoading(true);
     setError(null);
@@ -392,40 +320,37 @@ const postAnalyze = useCallback(
         setResult(data);
         lastAnalyzedTextRef.current = text;
       });
-
-      // Si Auto Read on — lir text ki itilizater finn avoy
-      speakText(text);
     } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      setError(e?.message ?? "Erer inkoni");
+      if (e?.name === "AbortError") {
+        // aborted: keep UI calm; no error toast
+      } else {
+        setError(e?.message ? String(e.message) : "Erer inatandu pandan analiz");
+      }
     } finally {
       setLoading(false);
     }
-  }, [text, speakText, startTransition, postAnalyze]);
+  }, [postAnalyze, startTransition, text]);
 
-// Replace your current resetAll with this
+  // 1) ADD near other refs/state in your Page() component
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-// 3) REPLACE resetAll with this (also clears the file input so you can re-upload)
-const resetAll = useCallback(() => {
-  if (abortRef.current) abortRef.current.abort();
-  if (csvAbortRef.current) csvAbortRef.current.abort();
+  // 3) REPLACE resetAll with this (also clears the file input so you can re-upload)
+  const resetAll = useCallback(() => {
+    if (abortRef.current) abortRef.current.abort();
+    if (csvAbortRef.current) csvAbortRef.current.abort();
 
-  setText("");
-  setResult(null);
-  setError(null);
-  lastAnalyzedTextRef.current = null;
+    setText("");
+    setResult(null);
+    setError(null);
+    lastAnalyzedTextRef.current = null;
 
-  setCsvData(null);
-  setCsvResults({});
-  setCsvLoading(false);
+    setCsvData(null);
+    setCsvResults({});
+    setCsvLoading(false);
 
-  // clear chosen file so the same CSV can be picked again
-  if (fileInputRef.current) fileInputRef.current.value = "";
-
-  stopSpeaking();
-}, [stopSpeaking]);
-
-
+    // clear chosen file so the same CSV can be picked again
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
 
   useEffect(() => {
     // Only act if we have a “last analyzed” snapshot and the text has changed
@@ -437,125 +362,115 @@ const resetAll = useCallback(() => {
     setLoading(false);
     setResult(null);
     setError(null);
-    stopSpeaking();
 
     // Prevent re-triggering on every keystroke
     lastAnalyzedTextRef.current = null;
-  }, [text, stopSpeaking]);
-
-  // 1) ADD near other refs/state in your Page() component
-const fileInputRef = useRef<HTMLInputElement | null>(null);
-
+  }, [text]);
 
   // --- CSV helpers: auto-analyze after upload and highlight per cell ---
-// REPLACE your analyzeCsv with this version
-const analyzeCsv = useCallback(
-  async (rows: string[][]) => {
-    if (csvAbortRef.current) csvAbortRef.current.abort();
-    const batchController = new AbortController();
-    csvAbortRef.current = batchController;
+  // REPLACE your analyzeCsv with this version
+  const analyzeCsv = useCallback(
+    async (rows: string[][]) => {
+      if (csvAbortRef.current) csvAbortRef.current.abort();
+      const batchController = new AbortController();
+      csvAbortRef.current = batchController;
 
-    setCsvResults({});
-    setCsvLoading(true);
+      setCsvResults({});
+      setCsvLoading(true);
 
-    // Prepare list of non-empty cells to scan
-    const jobs: { r: number; c: number; text: string }[] = [];
-    for (let r = 0; r < rows.length; r++) {
-      for (let c = 0; c < rows[r].length; c++) {
-        const cellText = (rows[r][c] ?? "").toString();
-        if (cellText.trim().length > 0) jobs.push({ r, c, text: cellText });
+      // Prepare list of non-empty cells to scan
+      const jobs: { r: number; c: number; text: string }[] = [];
+      for (let r = 0; r < rows.length; r++) {
+        for (let c = 0; c < rows[r].length; c++) {
+          const cellText = (rows[r][c] ?? "").toString();
+          if (cellText.trim().length > 0) jobs.push({ r, c, text: cellText });
+        }
       }
-    }
 
-    const BATCH = 6;
+      const BATCH = 6;
 
-    try {
-      for (let i = 0; i < jobs.length; i += BATCH) {
-        const slice = jobs.slice(i, i + BATCH);
-        // Use allSettled so one failure/hang (which we also timeout) doesn't block
-        const settled = await Promise.allSettled(
-          slice.map((job) => postAnalyze(job.text, batchController))
-        );
+      try {
+        for (let i = 0; i < jobs.length; i += BATCH) {
+          const slice = jobs.slice(i, i + BATCH);
+          // Use allSettled so one failure/hang (which we also timeout) doesn't block
+          const settled = await Promise.allSettled(slice.map((job) => postAnalyze(job.text, batchController)));
 
-        settled.forEach((res, idx) => {
-          const { r, c } = slice[idx];
-          const key = `${r}-${c}`;
-          if (res.status === "fulfilled") {
-            setCsvResults((prev) => ({ ...prev, [key]: res.value }));
-          } else {
-            // Mark failed cells as null so the UI can still render the text
-            setCsvResults((prev) => ({ ...prev, [key]: null }));
-          }
+          settled.forEach((res, idx) => {
+            const { r, c } = slice[idx];
+            const key = `${r}-${c}`;
+            if (res.status === "fulfilled") {
+              setCsvResults((prev) => ({ ...prev, [key]: res.value }));
+            } else {
+              // Mark failed cells as null so the UI can still render the text
+              setCsvResults((prev) => ({ ...prev, [key]: null }));
+            }
+          });
+
+          // Yield to the UI so the spinner updates smoothly
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      } finally {
+        setCsvLoading(false);
+      }
+    },
+    [postAnalyze]
+  );
+
+  // REPLACE your handleCsvUpload with this version
+  const handleCsvUpload = useCallback(
+    async (file: File) => {
+      try {
+        const sample = await file.slice(0, 256 * 1024).text();
+        const delimiter = guessDelimiter(sample);
+
+        Papa.parse<string[]>(file, {
+          delimiter,
+          worker: true, // parse off the main thread
+          dynamicTyping: false,
+          skipEmptyLines: false, // <-- keep empty rows
+          complete: (res: Papa.ParseResult<string[]>) => {
+            const fatal = (res.errors || []).filter((e) => e.code && e.code !== "UndetectableDelimiter");
+            if (fatal.length) {
+              setError("Pa kapav lir CSV: " + (fatal[0]?.message ?? "Parse error"));
+              return;
+            }
+
+            // Normalize: strings only + pad all rows to same width
+            const raw = (res.data as unknown as string[][]).map((r) => r.map((v) => (v == null ? "" : String(v))));
+            const maxCols = raw.reduce((m, r) => Math.max(m, r.length), 0);
+            const rows = raw.map((r) => (r.length < maxCols ? [...r, ...Array(maxCols - r.length).fill("")] : r));
+
+            setCsvData(rows);
+            analyzeCsv(rows); // auto-run, then render
+          },
+          error: (err: Error) => {
+            setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
+          },
         });
-
-        // Yield to the UI so the spinner updates smoothly
-        await new Promise((r) => setTimeout(r, 0));
+      } catch (err: any) {
+        setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
       }
-    } finally {
-      setCsvLoading(false);
-    }
-  },
-  [postAnalyze]
-);
+    },
+    [analyzeCsv]
+  );
 
-
-// REPLACE your handleCsvUpload with this version
-const handleCsvUpload = useCallback(
-  async (file: File) => {
-    try {
-      const sample = await file.slice(0, 256 * 1024).text();
-      const delimiter = guessDelimiter(sample);
-
-      Papa.parse<string[]>(file, {
-        delimiter,
-        worker: true,          // parse off the main thread
-        dynamicTyping: false,
-        skipEmptyLines: false, // <-- keep empty rows
-        complete: (res: Papa.ParseResult<string[]>) => {
-          const fatal = (res.errors || []).filter(
-            (e) => e.code && e.code !== "UndetectableDelimiter"
-          );
-          if (fatal.length) {
-            setError("Pa kapav lir CSV: " + (fatal[0]?.message ?? "Parse error"));
-            return;
-          }
-
-          // Normalize: strings only + pad all rows to same width
-          const raw = (res.data as unknown as string[][]).map((r) =>
-            r.map((v) => (v == null ? "" : String(v)))
-          );
-          const maxCols = raw.reduce((m, r) => Math.max(m, r.length), 0);
-          const rows = raw.map((r) =>
-            r.length < maxCols ? [...r, ...Array(maxCols - r.length).fill("")] : r
-          );
-
-          setCsvData(rows);
-          analyzeCsv(rows); // auto-run, then render
-        },
-        error: (err: Error) => {
-          setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
-        },
-      });
-    } catch (err: any) {
-      setError("Pa kapav lir CSV: " + (err?.message ?? String(err)));
-    }
-  },
-  [analyzeCsv]
-);
-
-
+  // Optional local state for the (present but previously empty) toggle
+  const [autoRead, setAutoRead] = useState(false);
 
   return (
-    <main className="min-h-dvh bg-gradient-to-b from-zinc-50 to-white">
+    <main className="min-h-dvh bg-gradient-to-b from-white via-red-200 to-red-400">
       {/* was: <div className="mx-auto max-w-4xl px-6 py-14 text-center"> */}
       <div className="mx-auto max-w-4xl px-6 py-14">
         {/* Header (center only the brand area) */}
         <header className="text-center mb-8">
-          <img src="/waa.png" alt="Brand logo" className="w-20 h-20 object-cover mx-auto" />
+          <img
+  src="/waa.png"
+  alt="Brand logo"
+  className="h-25 w-auto mx-auto object-contain"  // <- no cropping
+/>
           <h1 className="mt-2 text-3xl md:text-4xl font-semibold tracking-tight">MorisGuard</h1>
         </header>
-
-
 
         {/* Kart Antre (TEXT) */}
         <section className="rounded-3xl border bg-white shadow-sm p-6 md:p-8 mb-8">
@@ -600,36 +515,24 @@ const handleCsvUpload = useCallback(
             <label className="inline-flex items-center gap-2 rounded-2xl bg-white border px-4 py-2 text-sm cursor-pointer hover:bg-zinc-100">
               <Upload size={16} />
               <span>Attach CSV</span>
-<input
-  ref={fileInputRef}
-  type="file"
-  accept=".csv,text/csv"
-  className="hidden"
-  onClick={(e) => {
-    // ensure selecting the same file triggers onChange again
-    (e.currentTarget as HTMLInputElement).value = "";
-  }}
-  onChange={(e) => {
-    const f = e.target.files?.[0];
-    if (f) handleCsvUpload(f);
-  }}
-/>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                className="hidden"
+                onClick={(e) => {
+                  // ensure selecting the same file triggers onChange again
+                  (e.currentTarget as HTMLInputElement).value = "";
+                }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleCsvUpload(f);
+                }}
+              />
             </label>
 
             {/* Auto Read toggle */}
             <label className="inline-flex items-center gap-2 text-sm text-zinc-700">
-              <input
-                type="checkbox"
-                className="size-4 accent-zinc-900"
-                checked={autoRead}
-                onChange={(e) => setAutoRead(e.target.checked)}
-                aria-checked={autoRead}
-                aria-label="Surprise"
-              />
-              <span className="inline-flex items-center gap-1">
-                <Volume2 size={16} /> Surprise
-                {ttsSupported ? (isSpeaking ? " • " : "") : " (pa sipporté)"}
-              </span>
             </label>
           </div>
         </section>
@@ -653,7 +556,10 @@ const handleCsvUpload = useCallback(
                         const key = `${r}-${c}`;
                         const res = csvResults[key] || null;
                         const ms = res ? maxSeverity(res.issues) : null;
-                        const cellTint = ms == null ? "" : SEVERITY_STYLE[ms].replace(/text-[^\s]+/g, ""); // keep bg & ring only
+                        const cellTint =
+                          ms == null
+                            ? ""
+                            : SEVERITY_STYLE[ms as 0 | 1 | 2 | 3].replace(/text-[^\s]+/g, ""); // keep bg & ring only
                         return (
                           <td key={key} className="align-top p-2 border-b-0">
                             <div className={`rounded-xl px-2 py-1 ${cellTint}`}>
@@ -687,7 +593,7 @@ const handleCsvUpload = useCallback(
 
         {!result && !error && !csvData && (
           <section className="rounded-3xl border bg-white p-8 text-zinc-600 text-center">
-            <p className="text-lg">Lans enn analiz pou gete bann parti ki pa appropriate.</p>
+            <p className="text-lg">Lans enn analiz pou gete ban parti ki pa appropriate.</p>
           </section>
         )}
 
@@ -730,12 +636,10 @@ const handleCsvUpload = useCallback(
         )}
 
         {/* Footer */}
-        <footer className="mt-14 border-t pt-6 text-center text-sm text-zinc-500">TAX — All Right Reserved</footer>
+<footer className="mt-14 border-t pt-6 text-center text-sm text-black">
+  LOMESH — All Right Reserved
+</footer>
       </div>
     </main>
   );
 }
-
-
-
-
