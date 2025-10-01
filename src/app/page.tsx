@@ -87,7 +87,7 @@ function mergeSignals(...signals: (AbortSignal | null | undefined)[]) {
   };
 }
 
-const ANALYZE_TIMEOUT_MS = 20000; // 20s per cell request
+const ANALYZE_TIMEOUT_MS = 20000000; // 20s per cell request
 
 // Helper pou style selil dapre max severite dan li
 function maxSeverity(issues: Issue[]): 0 | 1 | 2 | 3 | null {
