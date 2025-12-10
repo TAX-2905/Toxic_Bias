@@ -477,20 +477,39 @@ export default function Page() {
           <label htmlFor="input" className="block text-sm font-medium text-zinc-700 mb-2">
             Paragraph
           </label>
-          <textarea
-            id="input"
-            ref={taRef}
-            value={text}
-            onInput={useCallback(
-              (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-                setText(e.target.value);
-                autoSize(e.currentTarget);
-              },
-              [autoSize]
-            )}
-            placeholder="Met 1 text ici pou analizer…"
-            className="w-full h-auto min-h-[10vh] md:min-h-[10vh] rounded-2xl border border-zinc-200 focus:ring-2 focus:ring-zinc-900/10 focus:outline-none p-5 bg-zinc-50/40 text-[16px] leading-7 overflow-hidden resize-none"
-          />
+<textarea
+    id="input"
+    ref={taRef}
+    value={text}
+    onInput={useCallback(
+        (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+            setText(e.target.value);
+            autoSize(e.currentTarget);
+        },
+        [autoSize]
+    )}
+    // ADD THIS NEW HANDLER
+    onKeyDown={(e) => {
+        // Only trigger on Enter key press
+        if (e.key === 'Enter') {
+            if (e.shiftKey) {
+                // If Shift + Enter, do nothing (allow default newline)
+                // You can optionally add logic here if you need to manually manage the newline,
+                // but usually just letting the default behavior happen is best.
+                return;
+            } else {
+                // If just Enter, prevent the default newline
+                e.preventDefault();
+                // Check if the text is not empty and not currently loading before analyzing
+                if (text.trim() && !loading) {
+                    analyze();
+                }
+            }
+        }
+    }}
+    placeholder="Met 1 text ici pou analizer…"
+    className="w-full h-auto min-h-[10vh] md:min-h-[10vh] rounded-2xl border border-zinc-200 focus:ring-2 focus:ring-zinc-900/10 focus:outline-none p-5 bg-zinc-50/40 text-[16px] leading-7 overflow-hidden resize-none"
+/>
 
           {/* Aksion */}
           <div className="mt-6 flex flex-wrap items-center gap-3">
